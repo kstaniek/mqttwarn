@@ -15,6 +15,7 @@ _mqttwarn_ supports a number of services (listed alphabetically below):
 * [asterisk](#asterisk)
 * [carbon](#carbon)
 * [dbus](#dbus)
+* [dnsupdate](#dnsupdate)
 * [emoncms](#emoncms)
 * [file](#file)
 * [freeswitch](#freeswitch)
@@ -215,6 +216,28 @@ targets = mysql:m1, log:info
 ```
 
 MQTT messages received at `icinga/+/+` will be directed to the three specified targets, whereas messages received at `my/special` will be stored in a `mysql` target and will be `log`ged at level "INFO".
+
+If more then one section is matching the topic then message will be handled to targets in all matching sections.
+
+Targets can be also defined as a dictionary containing the pairs of topic and targets. In that case message matching the section can be dispatched in more flexible ways to selected targets. Consider the following example:
+
+```ini
+[#]
+targets = {
+    '/#': 'file:0',
+    '/test/#': 'file:1',
+    '/test/out/#': 'file:2',
+    '/test/out/+': 'file:3',
+    '/test/out/+/+': 'file:4',
+    '/test/out/+/state': 'file:5',
+    '/test/out/FL_power_consumption/state': [ 'file:6', 'file:7' ],
+    '/test/out/BR_ambient_power_sensor/state': 'file:8',
+  }
+```
+
+With the message dispatching configuration the message is dispatched to the targets matching the most specific topic. If the message is received at `/test/out/FL_power_consumption/state` it will be directed to `file:6` and `file:7` targets only. Message received at `/test/out/AR_lamp/state` will be directed to `file:5`, but received at `/test/out/AR_lamp/command` will go to `file:4`.
+The dispatcher mechanism is always trying to find the most specific match.
+It allows to define the wide topic with default targets while some more specific topic can be handled differently. It gives additional flexibility in a message routing.
 
 Each of these sections has a number of optional (`O`) or mandatory (`M`)
 options:
@@ -422,6 +445,86 @@ targets = {
 
 Requires:
 * Python [dbus](http://www.freedesktop.org/wiki/Software/DBusBindings/#Python) bindings
+
+### `dnsupdate`
+
+The `dnsupdate` service updates an authoritative DNS server via RFC 2136 DNS Updates.
+Consider the following configuration:
+
+```ini
+[config:dnsupdate]
+dns_nameserver = '127.0.0.2'
+dns_keyname= 'mqttwarn-auth'
+dns_keyblob= 'kQNwTJ ... evi2DqP5UA=='
+targets = {
+   #target             DNS-Zone      DNS domain              TTL,  type
+   'temp'         :  [ 'foo.aa.',     'temperature.foo.aa.', 300, 'TXT'   ],
+   'addr'         :  [ 'foo.aa.',     'www.foo.aa.',         60,  'A'   ],
+  }
+
+[test/temp]
+targets = log:info, dnsupdate:temp
+format = Current temperature: {payload}C
+
+[test/a]
+targets = log:info, dnsupdate:addr
+format = {payload}
+```
+
+`dns_nameserver` is the address of the authoritative server the update should be sent
+to via a TCP update. `dns_keyname` and `dns_keyblob` are the TSIG key names and base64-representation of the key respectively. These can be created with either of:
+
+```
+ldns-keygen  -a hmac-sha256 -b 256 keyname
+dnssec-keygen -n HOST -a HMAC-SHA256 -b 256 keyname
+```
+
+where _keyname_ is the name then added to `dns_keyname` (in this example: `mqttwarn-auth`).
+
+Supposing a BIND DNS server configured to allow updates, you would then configure it
+as follows:
+
+```
+key "mqttwarn-auth" {
+  algorithm hmac-sha256;
+  secret "kQNwTJ ... evi2DqP5UA==";
+};
+
+...
+zone "foo.aa" in {
+   type master;
+   file "keytest/foo.aa";
+   update-policy {
+      grant mqttwarn-auth. zonesub ANY;
+   };
+};
+```
+
+For the `test/temp` topic, a pub and the resulting DNS query:
+
+```
+$ mosquitto_pub -t test/temp -m 42'
+$ dig @127.0.0.2 +noall +answer temperature.foo.aa txt
+temperature.foo.aa. 300 IN  TXT "Current temperature: 42C"
+```
+
+The `test/a` topic expects an address:
+
+```
+$ mosquitto_pub -t test/a -m 172.16.153.44
+$ dig @127.0.0.2 +short www.foo.aa
+172.16.153.44
+```
+
+Ensure you watch both mqttwarn's logfile as well as the log of your
+authoritative name server which will show you what's going on:
+
+```
+client 127.0.0.2#52786/key mqttwarn-auth: view internal: updating zone 'foo.aa/IN': adding an RR at 'www.foo.aa' A 172.16.153.44
+```
+
+Requires:
+* [dnspython](http://www.dnspython.org)
 
 ### `emoncms`
 
